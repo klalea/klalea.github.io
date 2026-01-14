@@ -2,118 +2,83 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Magenta.js MIDI Editor</title>
+    <title>Magenta AI MIDI Editor</title>
     <script src="https://cdn.jsdelivr.net/npm/@magenta/music@^1.23.1/dist/magentamusic.min.js"></script>
     <style>
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            background-color: #f0f2f5;
-            margin: 0;
-            padding: 20px;
-        }
-        #controls {
-            margin-bottom: 20px;
-            background: white;
-            padding: 15px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        #canvas-container {
-            width: 800px;
-            height: 400px;
-            overflow: auto;
-            background: white;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            position: relative;
-        }
-        canvas {
-            display: block;
-        }
-        button {
-            padding: 10px 20px;
-            cursor: pointer;
-            background-color: #4CAF50;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            font-size: 14px;
-            transition: background 0.3s;
-        }
-        button:hover {
-            background-color: #45a049;
-        }
-        button:disabled {
-            background-color: #ccc;
-        }
-        .status {
-            margin-top: 10px;
-            font-size: 12px;
-            color: #666;
-        }
+        body { font-family: sans-serif; background: #2c3e50; color: white; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        #controls { background: #34495e; padding: 20px; border-radius: 10px; margin-bottom: 10px; display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+        #canvas-container { background: white; border-radius: 5px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); overflow: auto; max-width: 90vw; }
+        button { padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; transition: 0.2s; }
+        .btn-play { background: #2ecc71; color: white; }
+        .btn-ai { background: #9b59b6; color: white; }
+        .btn-save { background: #3498db; color: white; }
+        .btn-reset { background: #e74c3c; color: white; }
+        button:hover { opacity: 0.8; transform: translateY(-1px); }
+        button:disabled { background: #7f8c8d; cursor: not-allowed; }
+        #status { margin-top: 10px; font-size: 14px; color: #bdc3c7; }
     </style>
 </head>
 <body>
 
-    <h2>Magenta.js MIDI Editor</h2>
+    <h2>Magenta.js AI MIDI Editor</h2>
 
     <div id="controls">
-        <button id="playBtn">再生 / 一時停止</button>
-        <button id="resetBtn">リセット</button>
-        <div class="status" id="statusText">クリックしてノートを追加できます。</div>
+        <button id="playBtn" class="btn-play">再生 / 停止</button>
+        <button id="generateBtn" class="btn-ai">AIで続きを生成</button>
+        <button id="saveBtn" class="btn-save">MIDI保存</button>
+        <button id="resetBtn" class="btn-reset">リセット</button>
     </div>
 
     <div id="canvas-container">
         <canvas id="canvas"></canvas>
     </div>
 
+    <div id="status">AIモデルを読み込み中...</div>
+
     <script>
-        // 初期データ（Cメジャースケールの簡単なノート）
+        // --- 設定と初期化 ---
         let sequence = {
-            notes: [
-                {pitch: 60, startTime: 0.0, endTime: 0.5},
-                {pitch: 62, startTime: 0.5, endTime: 1.0},
-                {pitch: 64, startTime: 1.0, endTime: 1.5},
-                {pitch: 65, startTime: 1.5, endTime: 2.0},
-            ],
-            totalTime: 4.0
+            notes: [],
+            totalTime: 0,
+            quantizationInfo: { stepsPerQuarter: 4 }
         };
 
         const canvas = document.getElementById('canvas');
-        const playBtn = document.getElementById('playBtn');
-        const resetBtn = document.getElementById('resetBtn');
-        const statusText = document.getElementById('statusText');
-
-        // プレイヤーとビジュアライザーの初期化
+        const status = document.getElementById('status');
+        
         const player = new mm.Player();
+        const music_rnn = new mm.MusicRNN('https://storage.googleapis.com/magentadata/js/checkpoints/music_rnn/basic_rnn');
         let visualizer;
 
-        function initVisualizer() {
-            // PianoRollCanvasVisualizerを使用
+        // モデルのロード
+        music_rnn.initialize().then(() => {
+            status.innerText = "準備完了：キャンバスをクリックして音を置き、AI生成を押してください";
+        });
+
+        function updateVisualizer() {
+            // シーケンスのソートと時間の整合性を整える
+            sequence.notes.sort((a, b) => a.startTime - b.startTime);
+            if (sequence.notes.length > 0) {
+                sequence.totalTime = Math.max(...sequence.notes.map(n => n.endTime));
+            }
+            
             visualizer = new mm.PianoRollCanvasVisualizer(sequence, canvas, {
-                noteRGB: '100, 149, 237',
-                activeNoteRGB: '240, 128, 128',
-                noteHeight: 10,
-                pixelsPerTimeStep: 100,
+                noteRGB: '52, 152, 219',
+                activeNoteRGB: '231, 76, 60',
+                noteHeight: 12,
+                pixelsPerTimeStep: 80,
             });
         }
 
-        // ノートの追加機能（エディタ機能の核）
+        // --- エディタ機能 ---
         canvas.addEventListener('mousedown', (event) => {
             const rect = canvas.getBoundingClientRect();
-            const x = event.clientX - rect.left;
-            const y = event.clientY - rect.top;
+            const x = (event.clientX - rect.left) + canvas.parentElement.scrollLeft;
+            const y = (event.clientY - rect.top);
 
-            // クリック位置からピッチと時間を逆算
-            // Visualizerの内部プロパティを使用して座標変換
-            const startTime = x / visualizer.config.pixelsPerTimeStep;
-            const pitch = visualizer.heightInPitches - Math.floor(y / visualizer.config.noteHeight) + visualizer.minPitch - 1;
+            const startTime = x / 80; // pixelsPerTimeStep
+            const pitch = 100 - Math.floor(y / 12); // 反転計算
 
-            // 新しいノートを追加
             const newNote = {
                 pitch: pitch,
                 startTime: startTime,
@@ -121,35 +86,68 @@
             };
 
             sequence.notes.push(newNote);
-            
-            // 再描画
-            visualizer.redraw(newNote, true);
-            statusText.innerText = `ノートを追加しました: Pitch ${pitch} at ${startTime.toFixed(2)}s`;
+            updateVisualizer();
         });
 
-        // 再生ボタンの制御
-        playBtn.addEventListener('click', () => {
+        // --- AI生成機能 ---
+        document.getElementById('generateBtn').addEventListener('click', async () => {
+            if (sequence.notes.length === 0) {
+                alert("まずはいくつか音を置いてください。");
+                return;
+            }
+
+            status.innerText = "AIが思考中...";
+            
+            // 現在のシーケンスを量子化（AIが理解できる形式に変換）
+            const qns = mm.sequences.quantizeNoteSequence(sequence, 4);
+            
+            // 続きを20ステップ（約5秒程度）生成
+            music_rnn.continueSequence(qns, 20, 1.0)
+                .then((continuation) => {
+                    // 生成されたノートを元のシーケンスに統合
+                    const unquantizedContinuation = mm.sequences.unquantizeNoteSequence(continuation);
+                    const offset = sequence.totalTime;
+                    
+                    unquantizedContinuation.notes.forEach(n => {
+                        sequence.notes.push({
+                            pitch: n.pitch,
+                            startTime: n.startTime + offset,
+                            endTime: n.endTime + offset
+                        });
+                    });
+                    
+                    updateVisualizer();
+                    status.innerText = "生成完了！";
+                });
+        });
+
+        // --- 再生と保存 ---
+        document.getElementById('playBtn').addEventListener('click', () => {
             if (player.isPlaying()) {
                 player.stop();
             } else {
-                // 再生開始（ユーザー操作が必要なためここで実行）
-                player.start(sequence).then(() => {
-                    statusText.innerText = "再生終了";
-                });
+                player.start(sequence);
             }
         });
 
-        // リセット
-        resetBtn.addEventListener('click', () => {
-            sequence.notes = [];
-            visualizer.redraw();
-            statusText.innerText = "キャンバスをリセットしました。";
+        document.getElementById('saveBtn').addEventListener('click', () => {
+            const midiData = mm.sequenceProtoToMidi(sequence);
+            const file = new Blob([midiData], {type: 'audio/midi'});
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(file);
+            a.download = 'magenta_composition.mid';
+            a.click();
         });
 
-        // 起動時に初期化
-        window.onload = () => {
-            initVisualizer();
-        };
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            sequence.notes = [];
+            sequence.totalTime = 0;
+            updateVisualizer();
+            status.innerText = "リセットしました。";
+        });
+
+        // 初期描画
+        updateVisualizer();
     </script>
 </body>
 </html>
