@@ -2,152 +2,179 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <title>Magenta AI MIDI Editor</title>
+    <title>Advanced Magenta MIDI Editor</title>
     <script src="https://cdn.jsdelivr.net/npm/@magenta/music@^1.23.1/dist/magentamusic.min.js"></script>
     <style>
-        body { font-family: sans-serif; background: #2c3e50; color: white; display: flex; flex-direction: column; align-items: center; padding: 20px; }
-        #controls { background: #34495e; padding: 20px; border-radius: 10px; margin-bottom: 10px; display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
-        #canvas-container { background: white; border-radius: 5px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); overflow: auto; max-width: 90vw; }
-        button { padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; transition: 0.2s; }
-        .btn-play { background: #2ecc71; color: white; }
-        .btn-ai { background: #9b59b6; color: white; }
-        .btn-save { background: #3498db; color: white; }
-        .btn-reset { background: #e74c3c; color: white; }
-        button:hover { opacity: 0.8; transform: translateY(-1px); }
-        button:disabled { background: #7f8c8d; cursor: not-allowed; }
-        #status { margin-top: 10px; font-size: 14px; color: #bdc3c7; }
+        :root { --bg: #1e1e1e; --panel: #2d2d2d; --accent: #007acc; }
+        body { font-family: sans-serif; background: var(--bg); color: white; margin: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+        
+        /* ツールバー */
+        #toolbar { background: var(--panel); padding: 10px 20px; display: flex; gap: 15px; align-items: center; border-bottom: 1px solid #444; }
+        button { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; background: #444; color: white; transition: 0.2s; }
+        button.primary { background: var(--accent); }
+        button:hover { background: #555; }
+        button:active { transform: translateY(1px); }
+
+        /* エディタエリア */
+        #editor-container { position: relative; flex-grow: 1; overflow: auto; display: flex; }
+        #piano-keys { width: 60px; background: #333; flex-shrink: 0; position: sticky; left: 0; z-index: 10; }
+        .key { height: 19px; border-bottom: 1px solid #111; font-size: 9px; display: flex; align-items: center; justify-content: flex-end; padding-right: 5px; color: #888; }
+        .black { background: #1a1a1a; }
+
+        /* キャンバス */
+        #canvas-wrapper { position: relative; }
+        canvas { display: block; background-image: 
+            linear-gradient(90deg, #333 1px, transparent 1px),
+            linear-gradient(#333 1px, transparent 1px);
+            background-size: 40px 20px; /* グリッドサイズ */
+        }
+        #play-head { position: absolute; top: 0; left: 0; width: 2px; height: 100%; background: #ff4d4d; pointer-events: none; visibility: hidden; }
+        
+        .hint { font-size: 12px; color: #aaa; margin-left: auto; }
     </style>
 </head>
 <body>
 
-    <h2>Magenta.js AI MIDI Editor</h2>
+<div id="toolbar">
+    <button id="playBtn" class="primary">再生 / 停止</button>
+    <button id="clearBtn">全消去</button>
+    <button id="saveBtn">MIDI保存</button>
+    <span id="status">Ready</span>
+    <span class="hint">左クリック: 追加 | 右クリック: 削除</span>
+</div>
 
-    <div id="controls">
-        <button id="playBtn" class="btn-play">再生 / 停止</button>
-        <button id="generateBtn" class="btn-ai">AIで続きを生成</button>
-        <button id="saveBtn" class="btn-save">MIDI保存</button>
-        <button id="resetBtn" class="btn-reset">リセット</button>
-    </div>
-
-    <div id="canvas-container">
+<div id="editor-container">
+    <div id="piano-keys"></div>
+    <div id="canvas-wrapper">
         <canvas id="canvas"></canvas>
+        <div id="play-head"></div>
     </div>
+</div>
 
-    <div id="status">AIモデルを読み込み中...</div>
+<script>
+    // --- 定数と設定 ---
+    const PITCH_CNT = 88;
+    const MIN_PITCH = 21;
+    const NOTE_HEIGHT = 20;
+    const PIXELS_PER_STEP = 40; // 16分音符 1つ分
+    const STEPS_PER_QUARTER = 4;
+    
+    let sequence = { notes: [], totalTime: 0 };
+    const canvas = document.getElementById('canvas');
+    const playHead = document.getElementById('play-head');
+    const ctx = canvas.getContext('2d');
+    const player = new mm.Player();
 
-    <script>
-        // --- 設定と初期化 ---
-        let sequence = {
-            notes: [],
-            totalTime: 0,
-            quantizationInfo: { stepsPerQuarter: 4 }
-        };
-
-        const canvas = document.getElementById('canvas');
-        const status = document.getElementById('status');
+    // --- 初期化 ---
+    function init() {
+        canvas.height = PITCH_CNT * NOTE_HEIGHT;
+        canvas.width = 3200; // 長めのキャンバス
         
-        const player = new mm.Player();
-        const music_rnn = new mm.MusicRNN('https://storage.googleapis.com/magentadata/js/checkpoints/music_rnn/basic_rnn');
-        let visualizer;
-
-        // モデルのロード
-        music_rnn.initialize().then(() => {
-            status.innerText = "準備完了：キャンバスをクリックして音を置き、AI生成を押してください";
-        });
-
-        function updateVisualizer() {
-            // シーケンスのソートと時間の整合性を整える
-            sequence.notes.sort((a, b) => a.startTime - b.startTime);
-            if (sequence.notes.length > 0) {
-                sequence.totalTime = Math.max(...sequence.notes.map(n => n.endTime));
-            }
-            
-            visualizer = new mm.PianoRollCanvasVisualizer(sequence, canvas, {
-                noteRGB: '52, 152, 219',
-                activeNoteRGB: '231, 76, 60',
-                noteHeight: 12,
-                pixelsPerTimeStep: 80,
-            });
+        // 鍵盤の描画
+        const keysDiv = document.getElementById('piano-keys');
+        for (let i = 0; i < PITCH_CNT; i++) {
+            const pitch = (MIN_PITCH + PITCH_CNT - 1) - i;
+            const key = document.createElement('div');
+            key.className = `key ${[1,3,6,8,10].includes(pitch % 12) ? 'black' : ''}`;
+            key.innerHTML = pitch % 12 === 0 ? `C${Math.floor(pitch/12) - 1}` : '';
+            key.style.height = (NOTE_HEIGHT - 1) + 'px';
+            keysDiv.appendChild(key);
         }
+        render();
+    }
 
-        // --- エディタ機能 ---
-        canvas.addEventListener('mousedown', (event) => {
-            const rect = canvas.getBoundingClientRect();
-            const x = (event.clientX - rect.left) + canvas.parentElement.scrollLeft;
-            const y = (event.clientY - rect.top);
-
-            const startTime = x / 80; // pixelsPerTimeStep
-            const pitch = 100 - Math.floor(y / 12); // 反転計算
-
-            const newNote = {
-                pitch: pitch,
-                startTime: startTime,
-                endTime: startTime + 0.5
-            };
-
-            sequence.notes.push(newNote);
-            updateVisualizer();
+    // --- 描画ロジック ---
+    function render() {
+        // 背景とグリッドはCSSで処理しているため、ノートのみ描画
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        sequence.notes.forEach(note => {
+            const x = note.quantizedStartStep * PIXELS_PER_STEP;
+            const y = (PITCH_CNT - 1 - (note.pitch - MIN_PITCH)) * NOTE_HEIGHT;
+            
+            ctx.fillStyle = '#4da6ff';
+            ctx.fillRect(x + 1, y + 1, (note.quantizedEndStep - note.quantizedStartStep) * PIXELS_PER_STEP - 2, NOTE_HEIGHT - 2);
+            ctx.strokeStyle = '#fff';
+            ctx.strokeRect(x + 1, y + 1, (note.quantizedEndStep - note.quantizedStartStep) * PIXELS_PER_STEP - 2, NOTE_HEIGHT - 2);
         });
+    }
 
-        // --- AI生成機能 ---
-        document.getElementById('generateBtn').addEventListener('click', async () => {
-            if (sequence.notes.length === 0) {
-                alert("まずはいくつか音を置いてください。");
-                return;
-            }
+    // --- 編集ロジック ---
+    canvas.addEventListener('mousedown', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
 
-            status.innerText = "AIが思考中...";
-            
-            // 現在のシーケンスを量子化（AIが理解できる形式に変換）
-            const qns = mm.sequences.quantizeNoteSequence(sequence, 4);
-            
-            // 続きを20ステップ（約5秒程度）生成
-            music_rnn.continueSequence(qns, 20, 1.0)
-                .then((continuation) => {
-                    // 生成されたノートを元のシーケンスに統合
-                    const unquantizedContinuation = mm.sequences.unquantizeNoteSequence(continuation);
-                    const offset = sequence.totalTime;
-                    
-                    unquantizedContinuation.notes.forEach(n => {
-                        sequence.notes.push({
-                            pitch: n.pitch,
-                            startTime: n.startTime + offset,
-                            endTime: n.endTime + offset
-                        });
-                    });
-                    
-                    updateVisualizer();
-                    status.innerText = "生成完了！";
+        const step = Math.floor(x / PIXELS_PER_STEP);
+        const pitch = (MIN_PITCH + PITCH_CNT - 1) - Math.floor(y / NOTE_HEIGHT);
+
+        if (e.button === 0) { // 左クリック: 追加
+            // 重複チェック
+            if (!sequence.notes.some(n => n.pitch === pitch && n.quantizedStartStep === step)) {
+                sequence.notes.push({
+                    pitch: pitch,
+                    quantizedStartStep: step,
+                    quantizedEndStep: step + 1,
+                    program: 0
                 });
-        });
-
-        // --- 再生と保存 ---
-        document.getElementById('playBtn').addEventListener('click', () => {
-            if (player.isPlaying()) {
-                player.stop();
-            } else {
-                player.start(sequence);
             }
-        });
+        } else if (e.button === 2) { // 右クリック: 削除
+            sequence.notes = sequence.notes.filter(n => 
+                !(n.pitch === pitch && n.quantizedStartStep <= step && n.quantizedEndStep > step)
+            );
+        }
+        
+        sequence.totalTime = Math.max(...sequence.notes.map(n => n.quantizedEndStep), 0) * 0.25;
+        render();
+    });
 
-        document.getElementById('saveBtn').addEventListener('click', () => {
-            const midiData = mm.sequenceProtoToMidi(sequence);
-            const file = new Blob([midiData], {type: 'audio/midi'});
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(file);
-            a.download = 'magenta_composition.mid';
-            a.click();
-        });
+    // 右クリックメニュー禁止
+    canvas.oncontextmenu = (e) => e.preventDefault();
 
-        document.getElementById('resetBtn').addEventListener('click', () => {
-            sequence.notes = [];
-            sequence.totalTime = 0;
-            updateVisualizer();
-            status.innerText = "リセットしました。";
-        });
+    // --- 再生ロジック ---
+    document.getElementById('playBtn').addEventListener('click', async () => {
+        if (player.isPlaying()) {
+            player.stop();
+            playHead.style.visibility = 'hidden';
+        } else {
+            if (sequence.notes.length === 0) return;
+            
+            // Magenta用に量子化済みデータを準備
+            const qns = mm.sequences.unquantizeNoteSequence(
+                Object.assign({ quantizationInfo: { stepsPerQuarter: 4 } }, sequence)
+            );
 
-        // 初期描画
-        updateVisualizer();
-    </script>
+            playHead.style.visibility = 'visible';
+            player.start(qns, undefined).then(() => {
+                playHead.style.visibility = 'hidden';
+            });
+
+            // 再生ヘッドの更新アニメーション
+            const updateHead = () => {
+                if (player.isPlaying()) {
+                    const currentStep = player.getPlayState().ticks / (player.context.transport.PPQ / 4);
+                    playHead.style.left = (currentStep * PIXELS_PER_STEP) + 'px';
+                    requestAnimationFrame(updateHead);
+                }
+            };
+            updateHead();
+        }
+    });
+
+    document.getElementById('clearBtn').onclick = () => { sequence.notes = []; render(); };
+    document.getElementById('saveBtn').onclick = () => {
+        const midi = mm.sequenceProtoToMidi(mm.sequences.unquantizeNoteSequence(
+            Object.assign({ quantizationInfo: { stepsPerQuarter: 4 } }, sequence)
+        ));
+        const blob = new Blob([midi], { type: 'audio/midi' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'editor_output.mid';
+        a.click();
+    };
+
+    init();
+</script>
 </body>
 </html>
